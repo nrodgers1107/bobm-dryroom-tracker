@@ -1,0 +1,13 @@
+{
+  "appId": "com.nrodgers.bobmtracker",
+  "appName": "BOBM Tracker",
+  "webDir": "www",
+  "server": {
+    "url": "https://bobm-dryroom-tracker.vercel.app",
+    "allowNavigation": ["bobm-dryroom-tracker.vercel.app", "*.supabase.co"]
+  },
+  "ios": { "contentInset": "never", "limitsNavigationsToAppBoundDomains": false, "backgroundColor": "#0b2a5b" },
+  "plugins": {
+    "PushNotifications": { "presentationOptions": ["badge", "sound", "alert"] }
+  }
+}

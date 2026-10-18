@@ -1,0 +1,124 @@
+name: iPhone app → TestFlight
+
+on:
+  workflow_dispatch:            # "Run workflow" button on the Actions tab
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - "capacitor.config.json"
+      - "package.json"
+      - ".github/workflows/ios-testflight.yml"
+  schedule:
+    - cron: "0 15 1 * *"        # 1st of every month, so the TestFlight build never hits its 90-day expiry
+
+permissions:
+  contents: write               # only used for the monthly keep-alive commit
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - name: Check Apple secrets are set
+        id: gate
+        run: |
+          missing=""
+          for v in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 APPLE_TEAM_ID; do [ -z "${!v}" ] && missing="$missing $v"; done
+          if [ -n "$missing" ]; then
+            echo "::warning::Skipping build — add these repository secrets first:$missing"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.ok == 'true'
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        if: steps.gate.outputs.ok == 'true'
+        with:
+          xcode-version: latest-stable
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ok == 'true'
+        with:
+          node-version: 22
+
+      - name: Install & sync Capacitor
+        if: steps.gate.outputs.ok == 'true'
+        run: |
+          npm ci
+          npx cap sync ios
+
+      - name: Apple API key
+        if: steps.gate.outputs.ok == 'true'
+        run: |
+          mkdir -p ~/private_keys
+          printf '%s\n' "$ASC_KEY_P8" > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          echo "KEY_PATH=$HOME/private_keys/AuthKey_${ASC_KEY_ID}.p8" >> "$GITHUB_ENV"
+          echo "BUILD_NO=$(( GITHUB_RUN_NUMBER + 100 )).${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+
+      - name: Archive
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: ios/App
+        run: |
+          xcodebuild archive \
+            -project App.xcodeproj -scheme App -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CURRENT_PROJECT_VERSION="$BUILD_NO" \
+            | tee "$RUNNER_TEMP/archive.log" | grep -E "error:|warning: .*sign|ARCHIVE (SUCCEEDED|FAILED)|Signing Identity|Provisioning Profile" || true
+          test -d "$RUNNER_TEMP/App.xcarchive" || { tail -80 "$RUNNER_TEMP/archive.log"; exit 1; }
+
+      - name: Upload to TestFlight
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: ios/App
+        run: |
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          echo "### ✅ Build $BUILD_NO uploaded — it shows in TestFlight after Apple finishes processing (about 10–30 min)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up key
+        if: always()
+        run: rm -rf ~/private_keys
+
+  # GitHub pauses scheduled workflows on repos with no activity for 60 days; a tiny monthly commit prevents that
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          date -u +%Y-%m-%d > .github/last-monthly-build
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add .github/last-monthly-build
+          git commit -m "Monthly TestFlight refresh [skip ci]" && git push || true
