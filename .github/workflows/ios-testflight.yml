@@ -72,7 +72,7 @@ jobs:
         if: steps.gate.outputs.ok == 'true'
         working-directory: ios/App
         run: |
-          # archive unsigned; the export step signs it for the App Store
+          # archive unsigned; the export step signs it for the App Store (Apple signs it in the cloud)
           # (signing here would need a development profile, which needs a registered iPhone)
           xcodebuild archive \
             -project App.xcodeproj -scheme App -configuration Release \
@@ -84,6 +84,12 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
             | tee "$RUNNER_TEMP/archive.log" | grep -E "error:|warning: .*sign|ARCHIVE (SUCCEEDED|FAILED)|Signing Identity|Provisioning Profile" || true
           test -d "$RUNNER_TEMP/App.xcarchive" || { tail -80 "$RUNNER_TEMP/archive.log"; exit 1; }
+          # give the unsigned app a placeholder signature that carries its permissions (push, time-sensitive),
+          # so the App Store signing on export keeps them
+          APP="$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app"
+          if [ -d "$APP/Frameworks" ]; then find "$APP/Frameworks" -maxdepth 1 \( -name "*.framework" -o -name "*.dylib" \) -exec codesign --force --sign - --timestamp=none {} \; ; fi
+          codesign --force --sign - --timestamp=none --entitlements App/App.entitlements "$APP"
+          codesign -d --entitlements :- "$APP" 2>/dev/null | grep -q aps-environment || { echo "::error::Couldn't attach the app's permissions"; exit 1; }
 
       - name: Upload to TestFlight
         if: steps.gate.outputs.ok == 'true'
