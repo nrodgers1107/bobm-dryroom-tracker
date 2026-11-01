@@ -72,6 +72,7 @@ jobs:
         if: steps.gate.outputs.ok == 'true'
         working-directory: ios/App
         run: |
+          # sign for the App Store directly (a development profile would need a registered iPhone)
           xcodebuild archive \
             -project App.xcodeproj -scheme App -configuration Release \
             -destination "generic/platform=iOS" \
@@ -79,6 +80,7 @@ jobs:
             -allowProvisioningUpdates \
             -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CURRENT_PROJECT_VERSION="$BUILD_NO" \
+            CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY="Apple Distribution" \
             | tee "$RUNNER_TEMP/archive.log" | grep -E "error:|warning: .*sign|ARCHIVE (SUCCEEDED|FAILED)|Signing Identity|Provisioning Profile" || true
           test -d "$RUNNER_TEMP/App.xcarchive" || { tail -80 "$RUNNER_TEMP/archive.log"; exit 1; }
 
