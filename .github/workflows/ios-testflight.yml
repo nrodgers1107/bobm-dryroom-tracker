@@ -72,8 +72,8 @@ jobs:
         if: steps.gate.outputs.ok == 'true'
         working-directory: ios/App
         run: |
-          # archive with a local signature (keeps the push entitlement); the export step below signs it for the App Store.
-          # (a development profile here would need a registered iPhone, which this team doesn't have)
+          # archive unsigned; the export step signs it for the App Store
+          # (signing here would need a development profile, which needs a registered iPhone)
           xcodebuild archive \
             -project App.xcodeproj -scheme App -configuration Release \
             -destination "generic/platform=iOS" \
@@ -81,10 +81,9 @@ jobs:
             -allowProvisioningUpdates \
             -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CURRENT_PROJECT_VERSION="$BUILD_NO" \
-            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="-" PROVISIONING_PROFILE_SPECIFIER="" PROVISIONING_PROFILE="" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
             | tee "$RUNNER_TEMP/archive.log" | grep -E "error:|warning: .*sign|ARCHIVE (SUCCEEDED|FAILED)|Signing Identity|Provisioning Profile" || true
           test -d "$RUNNER_TEMP/App.xcarchive" || { tail -80 "$RUNNER_TEMP/archive.log"; exit 1; }
-          codesign -d --entitlements - "$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app" 2>&1 | tail -20 || true
 
       - name: Upload to TestFlight
         if: steps.gate.outputs.ok == 'true'
@@ -95,7 +94,7 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
             <key>method</key><string>app-store-connect</string>
-            <key>destination</key><string>upload</string>
+            <key>destination</key><string>export</string>
             <key>teamID</key><string>${APPLE_TEAM_ID}</string>
             <key>signingStyle</key><string>automatic</string>
             <key>uploadSymbols</key><true/>
@@ -108,6 +107,13 @@ jobs:
             -exportPath "$RUNNER_TEMP/export" \
             -allowProvisioningUpdates \
             -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          IPA=$(ls "$RUNNER_TEMP"/export/*.ipa)
+          # make sure the signed app still carries the push + time-sensitive permissions before sending it to Apple
+          mkdir -p "$RUNNER_TEMP/chk" && unzip -q "$IPA" -d "$RUNNER_TEMP/chk"
+          ENT=$(codesign -d --entitlements :- "$RUNNER_TEMP"/chk/Payload/*.app 2>/dev/null)
+          echo "$ENT"
+          echo "$ENT" | grep -q "aps-environment" || { echo "::error::Signed app is missing the push notification permission"; exit 1; }
+          xcrun altool --upload-app -f "$IPA" -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
           echo "### ✅ Build $BUILD_NO uploaded — it shows in TestFlight after Apple finishes processing (about 10–30 min)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up key
